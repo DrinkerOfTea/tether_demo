@@ -2,10 +2,14 @@ import pika
 
 class MessageSender(object):
 
+    """Class which can send messages to a REST API"""
+
     def __init__(self):
         pass
 
     def sendMessage(self, tetherRequest):
+        """Send a message"""
+
         #Send message to RMQ queue
         sessionName = tetherRequest["session"];
         message = tetherRequest["message"];

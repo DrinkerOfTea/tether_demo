@@ -1,7 +1,7 @@
 {
   "name": "tetheringDemo",
   "version": "0.0.1",
-  "description": "Tethering demonstrator",
+  "description": "Tethering demonstrator using React and Material UI",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

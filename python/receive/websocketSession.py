@@ -3,7 +3,9 @@ from autobahn.twisted.websocket import WebSocketServerProtocol
 import json
 
 class TetherReceptionSession(WebSocketServerProtocol):
-
+    """Session which manages a web socket connection to a client via a web
+    socket"""
+    
     def onConnect(self, request):
         print("Client connecting: {}".format(request.peer))
 
