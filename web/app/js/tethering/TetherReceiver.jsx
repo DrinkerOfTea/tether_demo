@@ -75,7 +75,7 @@ class TetherReceiver extends React.Component {
 
         this.websocket.onopen = this.registerToSession.bind(this);
         this.websocket.onerror = this.websocketError.bind(this);
-        this.websocket.handleMessage = this.receiveMessage.bind(this);
+        this.websocket.onmessage = this.receiveMessage.bind(this);
     }
 
     registerToSession() {
@@ -100,6 +100,9 @@ class TetherReceiver extends React.Component {
     }
 
     receiveMessage(event) {
+
+        console.log("Received message", event);
+
         let receivedMsg = JSON.parse(event.data);
 
         if(!receivedMsg.messageType) {
@@ -119,6 +122,11 @@ class TetherReceiver extends React.Component {
             this.setState({
                 lastMessage: receivedMsg.message
             });
+        }
+        else {
+            this.setState({
+                status: "Unknown message received"
+            })
         }
     }
 }

@@ -3,8 +3,9 @@ from websocketSession import TetherReceptionSession
 from autobahn.twisted.websocket import WebSocketServerProtocol, WebSocketServerFactory
 import sys
 from twisted.python import log
-from twisted.internet import reactor
+from twisted.internet import defer, reactor, protocol, task
 import pika
+from pika.adapters import twisted_connection
 
 class ReceiveServer(WebSocketServerFactory):
     """Web socket server for receiving tethering messages from Rabbit MQ and sending them
@@ -21,46 +22,34 @@ class ReceiveServer(WebSocketServerFactory):
         # Store sessions according to what sessionName they are against:
         self.sessionsByName = {}
 
-        # Store RMQ queues for each sessionName:
-        self.rmqQueues = {}
+        # Store queues for each session
+        self.sessionQueues = {}
 
-        # Open a channel to RabbitMQ and create an exchange:
-        self.rmqConnection = pika.BlockingConnection(pika.ConnectionParameters(host="localhost"))
-        self.rmqChannel = self.rmqConnection.channel()
-        self.rmqChannel.exchange_declare(exchange="tether", type="direct")
-
-        # Run a web socket server
+        # Run a web socket server to listen for web app clients requesting to join sessions
         self.protocol = TetherReceptionSession
         reactor.listenTCP(5001, self)
+
+        # Run a TCP server to connect to Rabbit MQ
+        parameters = pika.ConnectionParameters()
+        client_creator = protocol.ClientCreator(reactor, twisted_connection.TwistedProtocolConnection, parameters)
+        d = client_creator.connectTCP('localhost', 5672)
+        d.addCallback(lambda protocol : protocol.ready)
+        d.addCallback(self.listen_to_rmq)
+
+        #Run the Reactor server, listening to both client requests and RMQ
         reactor.run()
 
-    def register_tether_session(self, sessionName, session):
+    def register_tether_session(self, session_name, session):
         """Register a session to listen to messages for a particular session name"""
 
-        if not self.sessionsByName.has_key(sessionName):
-            self.sessionsByName[sessionName] = []
+        if not self.sessionsByName.has_key(session_name):
+            print("Creating new session name %s" % session_name)
+            self.sessionsByName[session_name] = []
+            self.listen_to_queue(session_name)
 
-            # Create a new RabbitMQ queue for the message
-            queueResult = self.rmqChannel.queue_declare(exclusive=True)
-            queueName = queueResult.method.queue
-            # Store queue (so it can be removed when all sessions closed
-            self.rmqQueues[sessionName] = queueName
-            # Bind to the queue:
-            self.rmqChannel.queue_bind(exchange="tether", queue=queueName, routing_key=sessionName)
+        self.sessionsByName[session_name].append(session)
 
-            # Consume from the queue:
-            def callback(ch, method, properties, body):
-                print("Received message from RMQ %r:%r" % (method.routing_key, body))
-                self.distribute_message(method.routing_key, body)
-
-            self.rmqChannel.basic_consume(callback, queue=queueName, no_ack=True)
-            print("Set up new queue %s for %s" % (queueName, sessionName) )
-
-            self.rmqChannel.start_consuming()
-
-        self.sessionsByName[sessionName].append(session)
-
-        print("Registered a tether session with new client for %s" % sessionName)
+        print("Registered a tether session with new client for %s" % session_name)
         print("Current sessions: %s" % self.sessionsByName)
 
     def close_session(self, session):
@@ -73,11 +62,12 @@ class ReceiveServer(WebSocketServerFactory):
                     self.remove_session(sessionName)
                 print("Unregistered a tether session with a client for session %s" % sessionName)
 
-    def remove_session(self, sessionName):
+    def remove_session(self, session_name):
         """Close a session with given name, including closing the RMQ queue"""
-        self.sessionsByName.pop(sessionName, None)
-        queueName = self.rmqQueues[sessionName]
-        self.rmqChannel.queue_delete(queue=queueName)
+        self.sessionsByName.pop(session_name, None)
+        # Close the queue
+        self.channel.queue_delete(queue=self.sessionQueues[session_name])
+        self.sessionQueues.pop(session_name, None)
 
     def distribute_message(self, session_name, body):
         # Find all clients for the session name and send the message to them:
@@ -88,6 +78,42 @@ class ReceiveServer(WebSocketServerFactory):
                 print("Sending to session")
                 session.send(body)
 
+    def set_message_listener(self, message_listener):
+        """Add a message listener, which can listen for messages for particular sessions"""
+        self.messageListener = message_listener
+
+    @defer.inlineCallbacks
+    def listen_to_rmq(self, connection):
+        print("Listening to RMQ")
+        self.channel = yield connection.channel()
+        self.exchange = yield self.channel.exchange_declare(exchange="tether", type="direct")
+
+    @defer.inlineCallbacks
+    def listen_to_queue(self, session_name):
+        """Listen for messages with routingKey=sessionName for a new session"""
+        queue = yield self.channel.queue_declare(exclusive=True)
+        queue_name = queue.method.queue
+        self.sessionQueues[session_name] = queue_name
+        yield self.channel.queue_bind(exchange="tether", queue=queue_name, routing_key=session_name)
+        yield self.channel.basic_qos(prefetch_count=1)
+        queue_object, consumer_tag = yield self.channel.basic_consume(queue=queue_name, no_ack=False)
+        l = task.LoopingCall(self.receive_from_rmq, queue_object)
+        l.start(0.01)
+        print("Started listening for messages with routing key %s" % session_name)
+
+    @defer.inlineCallbacks
+    def receive_from_rmq(self, queue_object):
+        ch, method, properties, body = yield queue_object.get()
+
+        session_name = method.routing_key
+
+        if body:
+            print("Message received from RMQ: %s : %s" % (session_name, body))
+            self.distribute_message(session_name, body)
+
+        yield ch.basic_ack(delivery_tag=method.delivery_tag)
+
 # Start a new server
 if __name__ == '__main__':
-     ReceiveServer()
+     receiveServer = ReceiveServer()
+
